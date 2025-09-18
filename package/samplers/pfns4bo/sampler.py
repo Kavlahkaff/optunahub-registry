@@ -39,7 +39,7 @@ def get_vanilla_gp_config(device: str) -> dict[str, Any]:
     ys = batch.target_y.to(device)
 
     config_vanilla_gp = {
-        "priordataloader_class_or_get_batch": priors.fast_gp.get_batch,
+        "priordataloader_class": priors.fast_gp.get_batch,
         "criterion": bar_distribution.FullSupportBarDistribution(
             bar_distribution.get_bucket_limits(num_outputs=100, ys=ys)
         ),
@@ -119,7 +119,7 @@ def get_heboplus_config(device: str) -> dict[str, Any]:
         8,
         12,
     ]:  # a few different samples in case the number of features makes a difference in y dist
-        b = config["priordataloader_class_or_get_batch"].get_batch_method(
+        b = config["priordataloader_class"].get_batch_method(
             bs,
             1000,
             num_hps,
