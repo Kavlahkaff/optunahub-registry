@@ -307,7 +307,7 @@ class PFNs4BOSampler(BaseSampler):
         (
             internal_search_space,
             normalized_params,
-        ) = gp_search_space.get_search_space_and_normalized_params(trials, search_space)
+        ) = get_search_space_and_normalized_params(trials, search_space)
 
         _sign = -1.0 if study.direction == StudyDirection.MINIMIZE else 1.0
         score_vals = np.array([_sign * cast(float, trial.value) for trial in trials])
