@@ -3,12 +3,13 @@ from __future__ import annotations
 from collections.abc import Sequence
 from dataclasses import dataclass
 from enum import IntEnum
+import math
 from typing import Any
 from typing import cast
+from typing import TYPE_CHECKING
 import warnings
 
 import numpy as np
-import optuna._gp.search_space as gp_search_space
 from optuna.distributions import BaseDistribution
 from optuna.distributions import CategoricalDistribution
 from optuna.distributions import FloatDistribution
@@ -33,6 +34,14 @@ from pfns4bo.scripts.acquisition_functions import optimize_acq_w_lbfgs
 from pfns4bo.train import train
 
 
+if TYPE_CHECKING:
+    import scipy.stats.qmc as qmc
+else:
+    from optuna._imports import _LazyImport
+
+    qmc = _LazyImport("scipy.stats.qmc")
+
+
 class ScaleType(IntEnum):
     LINEAR = 0
     LOG = 1
@@ -44,6 +53,75 @@ class SearchSpace:
     scale_types: np.ndarray
     bounds: np.ndarray
     steps: np.ndarray
+
+
+def unnormalize_one_param(
+    param_value: np.ndarray, scale_type: ScaleType, bounds: tuple[float, float], step: float
+) -> np.ndarray:
+    # param_value can be batched, or not.
+    if scale_type == ScaleType.CATEGORICAL:
+        return param_value
+    low, high = (bounds[0] - 0.5 * step, bounds[1] + 0.5 * step)
+    if scale_type == ScaleType.LOG:
+        low, high = (math.log(low), math.log(high))
+    param_value = param_value * (high - low) + low
+    if scale_type == ScaleType.LOG:
+        param_value = np.exp(param_value)
+    return param_value
+
+
+def normalize_one_param(
+    param_value: np.ndarray, scale_type: ScaleType, bounds: tuple[float, float], step: float
+) -> np.ndarray:
+    # param_value can be batched, or not.
+    if scale_type == ScaleType.CATEGORICAL:
+        return param_value
+    low, high = (bounds[0] - 0.5 * step, bounds[1] + 0.5 * step)
+    if scale_type == ScaleType.LOG:
+        low, high = (math.log(low), math.log(high))
+        param_value = np.log(param_value)
+    if high == low:
+        return np.full_like(param_value, 0.5)
+    param_value = (param_value - low) / (high - low)
+    return param_value
+
+
+def round_one_normalized_param(
+    param_value: np.ndarray, scale_type: ScaleType, bounds: tuple[float, float], step: float
+) -> np.ndarray:
+    assert scale_type != ScaleType.CATEGORICAL
+    if step == 0.0:
+        return param_value
+
+    param_value = unnormalize_one_param(param_value, scale_type, bounds, step)
+    param_value = (param_value - bounds[0] + 0.5 * step) // step * step + bounds[0]
+    param_value = np.clip(
+        (param_value - bounds[0] + 0.5 * step) // step * step + bounds[0],
+        bounds[0],
+        bounds[1],
+    )
+    param_value = normalize_one_param(param_value, scale_type, bounds, step)
+    return param_value
+
+
+def sample_normalized_params(
+    n: int, search_space: SearchSpace, rng: np.random.RandomState | None
+) -> np.ndarray:
+    rng = rng or np.random.RandomState()
+    dim = search_space.scale_types.shape[0]
+    scale_types = search_space.scale_types
+    bounds = search_space.bounds
+    steps = search_space.steps
+    qmc_engine = qmc.Sobol(dim, scramble=True, seed=rng.randint(np.iinfo(np.int32).max))
+    param_values = qmc_engine.random(n)
+    for i in range(dim):
+        if scale_types[i] == ScaleType.CATEGORICAL:
+            param_values[:, i] = np.floor(param_values[:, i] * bounds[i, 1])
+        elif steps[i] != 0.0:
+            param_values[:, i] = round_one_normalized_param(
+                param_values[:, i], scale_types[i], (bounds[i, 0], bounds[i, 1]), steps[i]
+            )
+    return param_values
 
 
 def get_search_space_and_normalized_params(
@@ -74,13 +152,45 @@ def get_search_space_and_normalized_params(
             steps[i] = 0.0 if distribution.step is None else distribution.step
             bounds[i, :] = (distribution.low, distribution.high)
 
-            values[:, i] = gp_search_space._normalize_one_param(
+            values[:, i] = normalize_one_param(
                 np.array([trial.params[param] for trial in trials]),
                 scale_types[i],
                 (bounds[i, 0], bounds[i, 1]),
                 steps[i],
             )
     return SearchSpace(scale_types, bounds, steps), values
+
+
+def get_unnormalized_param(
+    optuna_search_space: dict[str, BaseDistribution],
+    normalized_param: np.ndarray,
+) -> dict[str, Any]:
+    ret = {}
+    for i, (param, distribution) in enumerate(optuna_search_space.items()):
+        if isinstance(distribution, CategoricalDistribution):
+            ret[param] = distribution.to_external_repr(normalized_param[i])
+        else:
+            assert isinstance(
+                distribution,
+                (
+                    FloatDistribution,
+                    IntDistribution,
+                ),
+            )
+            scale_type = ScaleType.LOG if distribution.log else ScaleType.LINEAR
+            step = 0.0 if distribution.step is None else distribution.step
+            bounds = (distribution.low, distribution.high)
+            param_value = float(
+                np.clip(
+                    unnormalize_one_param(normalized_param[i], scale_type, bounds, step),
+                    distribution.low,
+                    distribution.high,
+                )
+            )
+            if isinstance(distribution, IntDistribution):
+                param_value = round(param_value)
+            ret[param] = param_value
+    return ret
 
 
 def get_vanilla_gp_config(device: str) -> dict[str, Any]:
@@ -327,7 +437,7 @@ class PFNs4BOSampler(BaseSampler):
         standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
 
         def rand_sample_func(n: int) -> torch.Tensor:
-            xs = gp_search_space._sample_normalized_params(n, internal_search_space, None)
+            xs = sample_normalized_params(n, internal_search_space, None)
             ret = torch.from_numpy(xs).to(torch.float32).to(self._device)
             return ret
 
@@ -349,7 +459,7 @@ class PFNs4BOSampler(BaseSampler):
             )
 
         normalized_param = x_options[torch.argmax(eis)]
-        return gp_search_space.get_unnormalized_param(search_space, normalized_param)
+        return get_unnormalized_param(search_space, normalized_param)
 
     def infer_relative_search_space(
         self, study: Study, trial: Trial
