@@ -1,6 +1,8 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
+from dataclasses import dataclass
+from enum import IntEnum
 from typing import Any
 from typing import cast
 import warnings
@@ -8,6 +10,9 @@ import warnings
 import numpy as np
 from optuna._gp import search_space as gp_search_space
 from optuna.distributions import BaseDistribution
+from optuna.distributions import CategoricalDistribution
+from optuna.distributions import FloatDistribution
+from optuna.distributions import IntDistribution
 from optuna.samplers import BaseSampler
 from optuna.samplers import RandomSampler
 from optuna.samplers._lazy_random_state import LazyRandomState
@@ -26,6 +31,56 @@ from pfns4bo import utils
 from pfns4bo.priors.fast_gp import get_batch
 from pfns4bo.scripts.acquisition_functions import optimize_acq_w_lbfgs
 from pfns4bo.train import train
+
+
+class ScaleType(IntEnum):
+    LINEAR = 0
+    LOG = 1
+    CATEGORICAL = 2
+
+
+@dataclass(frozen=True)
+class SearchSpace:
+    scale_types: np.ndarray
+    bounds: np.ndarray
+    steps: np.ndarray
+
+
+def get_search_space_and_normalized_params(
+    trials: list[FrozenTrial],
+    optuna_search_space: dict[str, BaseDistribution],
+) -> tuple[SearchSpace, np.ndarray]:
+    scale_types = np.zeros(len(optuna_search_space), dtype=np.int64)
+    bounds = np.zeros((len(optuna_search_space), 2), dtype=np.float64)
+    steps = np.zeros(len(optuna_search_space), dtype=np.float64)
+    values = np.zeros((len(trials), len(optuna_search_space)), dtype=np.float64)
+    for i, (param, distribution) in enumerate(optuna_search_space.items()):
+        if isinstance(distribution, CategoricalDistribution):
+            scale_types[i] = ScaleType.CATEGORICAL
+            bounds[i, :] = (0.0, len(distribution.choices))
+            steps[i] = 1.0
+            values[:, i] = np.array(
+                [distribution.to_internal_repr(trial.params[param]) for trial in trials]
+            )
+        else:
+            assert isinstance(
+                distribution,
+                (
+                    FloatDistribution,
+                    IntDistribution,
+                ),
+            )
+            scale_types[i] = ScaleType.LOG if distribution.log else ScaleType.LINEAR
+            steps[i] = 0.0 if distribution.step is None else distribution.step
+            bounds[i, :] = (distribution.low, distribution.high)
+
+            values[:, i] = gp_search_space.normalize_one_param(
+                np.array([trial.params[param] for trial in trials]),
+                scale_types[i],
+                (bounds[i, 0], bounds[i, 1]),
+                steps[i],
+            )
+    return SearchSpace(scale_types, bounds, steps), values
 
 
 def get_vanilla_gp_config(device: str) -> dict[str, Any]:
