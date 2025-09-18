@@ -68,7 +68,7 @@ def get_vanilla_gp_config(device: str) -> dict[str, Any]:
 
 def get_heboplus_config(device: str) -> dict[str, Any]:
     config = {
-        "priordataloader_class_or_get_batch": priors.get_batch_to_dataloader(
+        "priordataloader_class": priors.get_batch_to_dataloader(
             priors.get_batch_sequence(
                 priors.hebo_prior.get_batch,
                 priors.utils.sample_num_feaetures_get_batch,
