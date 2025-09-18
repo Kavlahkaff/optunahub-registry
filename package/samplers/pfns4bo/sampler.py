@@ -1,14 +1,13 @@
 from __future__ import annotations
 
 from collections.abc import Sequence
-import math
 from typing import Any
 from typing import cast
 import warnings
 
 import numpy as np
 import optuna._gp.search_space as gp_search_space
-from optuna._gp.search_space import _sample_normalized_params
+from optuna._gp.search_space import sample_normalized_params
 from optuna.distributions import BaseDistribution
 from optuna.samplers import BaseSampler
 from optuna.samplers import RandomSampler
@@ -21,100 +20,124 @@ from optuna.trial import Trial
 from optuna.trial import TrialState
 import torch
 
+from pfns4bo import bar_distribution
+from pfns4bo import encoders
+from pfns4bo import priors
 from pfns4bo import utils
-from pfns4bo.model import bar_distribution
-from pfns4bo.model.bar_distribution import BarDistributionConfig
-from pfns4bo.model.encoders import EncoderConfig
-from pfns4bo.priors import Batch
-from pfns4bo.priors.prior import AdhocPriorConfig
+from pfns4bo.priors.fast_gp import get_batch
 from pfns4bo.scripts.acquisition_functions import optimize_acq_w_lbfgs
-from pfns4bo.train import BatchShapeSamplerConfig
-from pfns4bo.train import MainConfig
-from pfns4bo.train import OptimizerConfig
 from pfns4bo.train import train
-from pfns4bo.train import TransformerConfig
 
 
-hps = None
-num_features = 1
-max_dataset_size = 20
+def get_vanilla_gp_config(device: str) -> dict[str, Any]:
+    hps = {
+        "outputscale": 1.0,
+        "lengthscale": 0.1,
+        "noise": 1e-4,
+    }
+    batch = get_batch(100000, 20, 1, hyperparameters=hps)
+    ys = batch.target_y.to(device)
+
+    config_vanilla_gp = {
+        "priordataloader_class_or_get_batch": priors.fast_gp.get_batch,
+        "criterion": bar_distribution.FullSupportBarDistribution(
+            bar_distribution.get_bucket_limits(num_outputs=100, ys=ys)
+        ),
+        "encoder_generator": encoders.get_normalized_uniform_encoder(encoders.Linear),
+        "emsize": 256,
+        "nhead": 4,
+        "nhid": 512,
+        "nlayers": 4,
+        "y_encoder_generator": encoders.Linear,
+        "extra_prior_kwargs_dict": {
+            "num_features": 1,
+            "fuse_x_y": False,
+            "hyperparameters": hps,
+        },
+        "epochs": 20,
+        "warmup_epochs": 5,
+        "steps_per_epoch": 100,
+        "batch_size": 8,
+        "lr": 0.001,
+        "seq_len": 20,
+        "single_eval_pos_gen": utils.get_uniform_single_eval_pos_sampler(20),
+    }
+
+    return config_vanilla_gp
 
 
-# in our convention we name the `num_datasets` -> `batch_size`, and the `num_points_in_each_dataset` -> `seq_len`
-
-
-def get_batch_for_ridge_regression(
-    batch_size: int = 2,
-    seq_len: int = 100,
-    num_features: int = 1,
-    hyperparameters: dict | None = None,
-    device: str = "cpu",
-) -> Batch:
-    if hyperparameters is None:
-        hyperparameters = {"a": 0.1, "b": 1.0}
-    ws = torch.distributions.Normal(torch.zeros(num_features + 1), hyperparameters["b"]).sample(
-        (batch_size,)
-    )
-
-    xs = torch.rand(batch_size, seq_len, num_features)
-    ys = torch.distributions.Normal(
-        torch.einsum("nmf, nf -> nm", torch.cat([xs, torch.ones(batch_size, seq_len, 1)], 2), ws),
-        hyperparameters["a"],
-    ).sample()[..., None]
-
-    # get_batch functions return two different ys, let's come back to this later, though.
-    return Batch(x=xs.to(device), y=ys.to(device), target_y=ys.to(device))
-
-
-def train_a_pfn(
-    get_batch_function: Any,
-    epochs: int = 10,
-    num_features: int = num_features,
-    max_dataset_size: int = max_dataset_size,
-    hps: dict | None = hps,
-    batch_size: int = 256,
-    steps_per_epoch: int = 100,
-) -> Any:
-    # define a bar distribution (riemann distribution) criterion with 1000 bars
-    ys = get_batch_function(100000, 20, num_features, hyperparameters=hps).target_y
-    # we define our bar distribution adaptively with respect to the above sample of target ys from our prior
-    borders = bar_distribution.get_bucket_borders(num_outputs=1_000, ys=ys).tolist()
-
-    config = MainConfig(
-        priors=[
-            AdhocPriorConfig(
-                get_batch_methods=[get_batch_function],
-                prior_kwargs={"num_features": num_features, "hyperparameters": hps},
+def get_heboplus_config(device: str) -> dict[str, Any]:
+    config = {
+        "priordataloader_class_or_get_batch": priors.get_batch_to_dataloader(
+            priors.get_batch_sequence(
+                priors.hebo_prior.get_batch,
+                priors.utils.sample_num_feaetures_get_batch,
             )
-        ],
-        optimizer=OptimizerConfig("adamw", lr=0.0003),
-        model=TransformerConfig(
-            criterion=BarDistributionConfig(full_support=True, borders=borders),
-            emsize=512,
-            nhead=8,
-            nhid=1024,
-            nlayers=6,
-            features_per_group=1,
-            attention_between_features=False,
-            # The encoder config ensures the uniform inputs between 0 and 1 have mean 0 and var 1
-            encoder=EncoderConfig(
-                constant_normalization_mean=0.5,
-                constant_normalization_std=math.sqrt(1 / 12),
-            ),
         ),
-        batch_shape_sampler=BatchShapeSamplerConfig(
-            batch_size=batch_size,
-            max_seq_len=max_dataset_size,
-            min_num_features=num_features,
-            max_num_features=num_features,
+        "encoder_generator": encoders.get_normalized_uniform_encoder(
+            encoders.get_variable_num_features_encoder(encoders.Linear)
         ),
-        epochs=epochs,
-        warmup_epochs=epochs // 4,
-        steps_per_epoch=steps_per_epoch,
-        num_workers=0,
+        "emsize": 512,
+        "nhead": 4,
+        "warmup_epochs": 5,
+        "y_encoder_generator": encoders.Linear,
+        "batch_size": 128,
+        "scheduler": utils.get_cosine_schedule_with_warmup,
+        "extra_prior_kwargs_dict": {
+            "num_features": 18,
+            "hyperparameters": {
+                "lengthscale_concentration": 1.2106559584074301,
+                "lengthscale_rate": 1.5212245992840594,
+                "outputscale_concentration": 0.8452312502679863,
+                "outputscale_rate": 0.3993553245745406,
+                "add_linear_kernel": False,
+                "power_normalization": False,
+                "hebo_warping": False,
+                "unused_feature_likelihood": 0.3,
+                "observation_noise": True,
+            },
+        },
+        "epochs": 50,
+        "lr": 0.0001,
+        "seq_len": 60,
+        "single_eval_pos_gen": utils.get_uniform_single_eval_pos_sampler(
+            50, min_len=1
+        ),  # <function utils.get_uniform_single_eval_pos_sampler.<locals>.<lambda>()>,
+        "aggregate_k_gradients": 2,
+        "nhid": 1024,
+        "steps_per_epoch": 1024,
+        "weight_decay": 0.0,
+        "train_mixed_precision": False,
+        "efficient_eval_masking": True,
+        "nlayers": 12,
+    }
+
+    bs = 128
+    all_targets = []
+    for num_hps in [
+        2,
+        8,
+        12,
+    ]:  # a few different samples in case the number of features makes a difference in y dist
+        b = config["priordataloader_class_or_get_batch"].get_batch_method(
+            bs,
+            1000,
+            num_hps,
+            epoch=0,
+            device=device,
+            hyperparameters={
+                **config["extra_prior_kwargs_dict"]["hyperparameters"],
+                "num_hyperparameter_samples_per_batch": -1,
+            },
+        )
+        all_targets.append(b.target_y.flatten())
+    ys = torch.cat(all_targets, 0).cpu()
+
+    config["criterion"] = bar_distribution.FullSupportBarDistribution(
+        bar_distribution.get_bucket_limits(1000, ys=ys)
     )
-    train_result = train(config, device="cpu", reusable_config=False)
-    return train_result
+
+    return config
 
 
 class PFNs4BOSampler(BaseSampler):
@@ -202,9 +225,9 @@ class PFNs4BOSampler(BaseSampler):
         if isinstance(prior, torch.nn.Module):
             trained_model = prior
         elif prior == "vanilla gp":
-            _, _, trained_model, _ = train()
+            _, _, trained_model, _ = train(**get_vanilla_gp_config(self._device))
         elif prior == "hebo":
-            _, _, trained_model, _ = train_a_pfn(get_batch_for_ridge_regression)
+            _, _, trained_model, _ = train(**get_heboplus_config(self._device))
         else:
             raise ValueError("You should specify `prior` as 'vanilla gp', 'hebo', or a model.")
 
@@ -251,7 +274,7 @@ class PFNs4BOSampler(BaseSampler):
         standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
 
         def rand_sample_func(n: int) -> torch.Tensor:
-            xs = _sample_normalized_params(n, internal_search_space, None)
+            xs = sample_normalized_params(n, internal_search_space, None)
             ret = torch.from_numpy(xs).to(torch.float32).to(self._device)
             return ret
 
