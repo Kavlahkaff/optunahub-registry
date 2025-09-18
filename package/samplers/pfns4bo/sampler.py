@@ -99,10 +99,9 @@ def get_heboplus_config(device: str) -> dict[str, Any]:
         },
         "epochs": 50,
         "lr": 0.0001,
-        "seq_len": 60,
-        "single_eval_pos_gen": utils.get_uniform_single_eval_pos_sampler(
-            50, min_len=1
-        ),  # <function utils.get_uniform_single_eval_pos_sampler.<locals>.<lambda>()>,
+        "bptt": 60,
+        "single_eval_pos_gen": utils.get_uniform_single_eval_pos_sampler(50, min_len=1),
+        # <function utils.get_uniform_single_eval_pos_sampler.<locals>.<lambda>()>,
         "aggregate_k_gradients": 2,
         "nhid": 1024,
         "steps_per_epoch": 1024,
