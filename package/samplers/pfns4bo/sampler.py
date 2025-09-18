@@ -74,7 +74,7 @@ def get_search_space_and_normalized_params(
             steps[i] = 0.0 if distribution.step is None else distribution.step
             bounds[i, :] = (distribution.low, distribution.high)
 
-            values[:, i] = gp_search_space.normalize_one_param(
+            values[:, i] = gp_search_space._normalize_one_param(
                 np.array([trial.params[param] for trial in trials]),
                 scale_types[i],
                 (bounds[i, 0], bounds[i, 1]),
@@ -327,7 +327,7 @@ class PFNs4BOSampler(BaseSampler):
         standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
 
         def rand_sample_func(n: int) -> torch.Tensor:
-            xs = gp_search_space.sample_normalized_params(n, internal_search_space, None)
+            xs = gp_search_space._sample_normalized_params(n, internal_search_space, None)
             ret = torch.from_numpy(xs).to(torch.float32).to(self._device)
             return ret
 
