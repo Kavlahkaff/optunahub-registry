@@ -8,7 +8,7 @@ from typing import cast
 import warnings
 
 import numpy as np
-from optuna._gp import search_space as gp_search_space
+import optuna._gp.search_space as gp_search_space
 from optuna.distributions import BaseDistribution
 from optuna.distributions import CategoricalDistribution
 from optuna.distributions import FloatDistribution
