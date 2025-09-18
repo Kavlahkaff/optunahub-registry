@@ -6,8 +6,8 @@ from typing import cast
 import warnings
 
 import numpy as np
+from optuna._gp import search_space as opt_search_space
 import optuna._gp.search_space as gp_search_space
-from optuna._gp.search_space import sample_normalized_params
 from optuna.distributions import BaseDistribution
 from optuna.samplers import BaseSampler
 from optuna.samplers import RandomSampler
@@ -274,7 +274,7 @@ class PFNs4BOSampler(BaseSampler):
         standarized_score_vals = (score_vals - score_vals.mean()) / max(1e-10, score_vals.std())
 
         def rand_sample_func(n: int) -> torch.Tensor:
-            xs = sample_normalized_params(n, internal_search_space, None)
+            xs = opt_search_space.sample_normalized_params(n, internal_search_space, None)
             ret = torch.from_numpy(xs).to(torch.float32).to(self._device)
             return ret
 
