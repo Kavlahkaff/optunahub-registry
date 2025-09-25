@@ -18,6 +18,7 @@ from syne_tune.optimizer.baselines import BORE
 from syne_tune.optimizer.baselines import CQR
 from syne_tune.optimizer.baselines import RandomSearch
 from syne_tune.optimizer.baselines import REA
+from syne_tune.optimizer.baselines import TPE
 
 
 if TYPE_CHECKING:
@@ -36,6 +37,7 @@ scheduler_cls_dict = {
     "BORE": BORE,
     "REA": REA,
     "CQR": CQR,
+    "TPE": TPE,
 }
 
 
